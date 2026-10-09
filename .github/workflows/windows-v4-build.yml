@@ -1,0 +1,51 @@
+name: Windows V4 test build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v4-support]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install MAUI Windows workload
+        run: dotnet workload install maui-windows
+      - name: Restore tests
+        run: dotnet restore MapMaven.Core.Tests/MapMaven.Core.Tests.csproj
+      - name: Test
+        run: dotnet test MapMaven.Core.Tests/MapMaven.Core.Tests.csproj --no-restore -c Release --logger "trx;LogFileName=tests.trx"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: MapMaven.Core.Tests/TestResults/*.trx
+      - name: Publish self-contained Windows application
+        run: >-
+          dotnet publish MapMaven/MapMaven.csproj
+          -f net8.0-windows10.0.19041.0 -c Release
+          -r win-x64
+          -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
+          -p:WindowsPackageType=None -p:PublishTrimmed=false
+          -o artifacts/MapMaven-V4
+      - name: Package test build
+        shell: pwsh
+        run: |
+          if (!(Test-Path artifacts/MapMaven-V4/MapMaven.exe)) { throw 'Missing application executable' }
+          Copy-Item scripts/Launch-MapMaven.cmd artifacts/MapMaven-V4/
+          Copy-Item docs/windows-v4-build.md artifacts/MapMaven-V4/README.md
+          Compress-Archive -Path artifacts/MapMaven-V4 -DestinationPath artifacts/MapMaven-V4-win-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MapMaven-V4-win-x64
+          path: artifacts/MapMaven-V4-win-x64.zip
+          if-no-files-found: error

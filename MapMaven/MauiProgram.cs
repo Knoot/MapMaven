@@ -149,6 +149,7 @@ public static class MauiProgram
 
     private static async Task ExecuteStartupProcedures(MauiApp mauiApp)
     {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MAPMAVEN_DATA_DIRECTORY"))) return;
         var logger = mauiApp.Services.GetService<ILogger<App>>();
 
         try

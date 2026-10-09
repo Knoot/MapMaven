@@ -318,7 +318,8 @@ public class LivePlaylistArrangementIntegrationTests
         $$"""
         {
           "_songName": "{{mapInfo.MapInfo.SongName}}",
-          "_songAuthorName": "{{mapInfo.MapInfo.SongAuthorName}}"
+          "_songAuthorName": "{{mapInfo.MapInfo.SongAuthorName}}",
+          "_songFilename": "song.egg"
         }
         """;
 
@@ -381,7 +382,7 @@ public class LivePlaylistArrangementIntegrationTests
     }
 
     [Fact]
-    public async Task ArrangeLivePlaylists_FetchesMapsFromCache_IfHashIsFoundInCache()
+    public async Task ArrangeLivePlaylists_ValidatesCurrentMetadata_IfHashIsFoundInCache()
     {
         AddMockPlaylistWithConfig(new JObject
         {
@@ -418,7 +419,8 @@ public class LivePlaylistArrangementIntegrationTests
         var resultMap = resultMaps.First();
 
         Assert.Equal("Come Alive", resultMap.Name);
-        Assert.Equal("test123", resultMap.SongAuthorName);
+        Assert.Equal("Pendulum", resultMap.SongAuthorName);
+        Assert.Equal("test123", resultMap.Hash);
     }
 
     [Fact]

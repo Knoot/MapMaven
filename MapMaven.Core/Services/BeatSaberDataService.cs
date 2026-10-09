@@ -94,14 +94,13 @@ namespace MapMaven.Services
                     .Select(g => g.First())
                     .ToDictionary(i => i.Hash);
 
-                await CacheMapInfo(mapInfoDictionary);
-
                 _mapInfo.OnNext(mapInfoDictionary);
+
+                await CacheMapInfo(mapInfoDictionary);
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, "Error while loading all map info.");
-                throw;
             }
             finally
             {
@@ -125,7 +124,7 @@ namespace MapMaven.Services
 
             var mapInfo = await GetMapInfo(mapDirectory);
 
-            if (_mapInfo.Value.ContainsKey(mapInfo.Hash))
+            if (mapInfo == null || _mapInfo.Value.ContainsKey(mapInfo.Hash))
                 return;
 
             _mapInfo.Value.Add(mapInfo.Hash, mapInfo);
@@ -142,8 +141,8 @@ namespace MapMaven.Services
             var songDurationCache = await GetSongDurationCache();
             var mapInfoCache = await GetMapInfoCache();
 
-            var mapsByHash = mapInfoCache.ToDictionary(i => i.Hash);
-            var mapsByDirectoryPath = mapInfoCache.ToDictionary(i => i.DirectoryPath.NormalizePath());
+            var mapsByHash = mapInfoCache.GroupBy(i => i.Hash).ToDictionary(g => g.Key, g => g.First());
+            var mapsByDirectoryPath = mapInfoCache.GroupBy(i => i.DirectoryPath.NormalizePath()).ToDictionary(g => g.Key, g => g.First());
 
             var fileReadTasks = _fileSystem.Directory.EnumerateDirectories(_fileService.MapsLocation)
                 .Select(mapDirectory => GetMapInfo(mapDirectory, songHashData, mapsByHash, mapsByDirectoryPath, songDurationCache));
@@ -321,6 +320,11 @@ namespace MapMaven.Services
                     songDurationCache = new();
 
                 var normalizedMapDirectory = mapDirectory.NormalizePath();
+                var infoFilePath = _fileSystem.Path.Combine(normalizedMapDirectory, "Info.dat");
+                var mapInfoText = await _fileSystem.File.ReadAllTextAsync(infoFilePath);
+                var parsedInfo = MapMetadataParser.Parse(mapInfoText);
+                using var metadata = JsonDocument.Parse(mapInfoText);
+                var isV4 = MapMetadataParser.IsV4(metadata.RootElement);
 
                 var mapHash = mapsByDirectoryCache.GetValueOrDefault(normalizedMapDirectory)?.Hash;
 
@@ -339,26 +343,26 @@ namespace MapMaven.Services
                 {
                     Debug.WriteLine($"Dit not find hash for {normalizedMapDirectory}");
 
-                    var hashResult = await _beatmapHasher.HashDirectoryAsync(normalizedMapDirectory, new CancellationToken());
-
-                    if (hashResult.ResultType != HashResultType.Success)
-                        return null;
-
-                    mapHash = hashResult.Hash;
+                    if (isV4)
+                    {
+                        mapHash = await V4MapHasher.HashAsync(_fileSystem, normalizedMapDirectory, mapInfoText);
+                    }
+                    else
+                    {
+                        var hashResult = await _beatmapHasher.HashDirectoryAsync(normalizedMapDirectory, new CancellationToken());
+                        if (hashResult.ResultType != HashResultType.Success)
+                            throw new InvalidDataException($"Hashing failed: {hashResult.ResultType}");
+                        mapHash = hashResult.Hash;
+                    }
                 }
 
-                if (mapsByHashCache.TryGetValue(mapHash, out var info))
-                {
-                    // Map info was found in cache. No further data retrieval nescessary.
-                    return info;
-                }
-                else
-                {
-                    var infoFilePath = _fileSystem.Path.Combine(normalizedMapDirectory, "Info.dat");
-                    var mapInfoText = await _fileSystem.File.ReadAllTextAsync(infoFilePath);
+                if (string.IsNullOrWhiteSpace(mapHash))
+                    throw new InvalidDataException("Hasher returned an empty map hash.");
 
-                    info = JsonSerializer.Deserialize<MapInfo>(mapInfoText);
-                }
+                // Always validate current metadata, including when a persisted hash is available.
+                var info = parsedInfo;
+                if (info.SongDuration <= TimeSpan.Zero && mapsByHashCache.TryGetValue(mapHash, out var cachedInfo))
+                    info.SongDuration = cachedInfo.SongDuration;
 
                 info.Hash = mapHash;
                 info.DirectoryPath = normalizedMapDirectory;
@@ -368,7 +372,7 @@ namespace MapMaven.Services
                 info.Id = _mapIdRegex.Match(directoryName)?.Value;
 
                 if (string.IsNullOrEmpty(info.Id))
-                    return null;
+                    throw new InvalidDataException("Map directory does not start with a BeatSaver ID.");
 
                 var mapDirectoryInfo = _fileSystem.DirectoryInfo.New(normalizedMapDirectory);
 
@@ -393,6 +397,7 @@ namespace MapMaven.Services
         {
             try
             {
+                if (info.SongDuration > TimeSpan.Zero) return;
                 var relativeMapDirectory = GetRelativeMapPath(info.DirectoryPath);
 
                 SongDuration? songDuration;
@@ -464,11 +469,17 @@ namespace MapMaven.Services
         /// </summary>
         private async Task<IEnumerable<MapInfo>> GetMapInfoCache()
         {
-            using var scope = _serviceProvider.CreateScope();
-
-            var dataStore = scope.ServiceProvider.GetService<IDataStore>();
-
-            return await dataStore.Set<MapInfo>().ToListAsync();
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var dataStore = scope.ServiceProvider.GetRequiredService<IDataStore>();
+                return await dataStore.Set<MapInfo>().ToListAsync();
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "Failed to read map cache; loading metadata from disk instead.");
+                return Array.Empty<MapInfo>();
+            }
         }
 
         /// <summary>
@@ -477,17 +488,33 @@ namespace MapMaven.Services
         /// </summary>
         private async Task CacheMapInfo(Dictionary<string, MapInfo> mapInfoByHash)
         {
-            if (!mapInfoByHash.Any())
-                return;
+            foreach (var info in mapInfoByHash.Values)
+            {
+                try
+                {
+                    MapMetadataParser.Validate(info);
+                    if (string.IsNullOrWhiteSpace(info.Id) || string.IsNullOrWhiteSpace(info.Hash) || string.IsNullOrWhiteSpace(info.DirectoryPath))
+                        throw new InvalidDataException("Missing map identity or directory.");
+                    using var scope = _serviceProvider.CreateScope();
+                    var dataStore = scope.ServiceProvider.GetRequiredService<IDataStore>();
+                    var existing = await dataStore.Set<MapInfo>().FindAsync(info.Id);
+                    if (existing != null) dataStore.Set<MapInfo>().Entry(existing).CurrentValues.SetValues(info);
+                    else dataStore.Set<MapInfo>().Add(info);
+                    await dataStore.SaveChangesAsync();
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(exception, "Failed to cache map info for {MapDirectory}", info.DirectoryPath);
+                }
+            }
 
-            using var scope = _serviceProvider.CreateScope();
-
-            var dataStore = scope.ServiceProvider.GetService<IDataStore>();
-
-            dataStore.Set<MapInfo>().RemoveRange(dataStore.Set<MapInfo>());
-            dataStore.Set<MapInfo>().AddRange(mapInfoByHash.Values);
-
-            await dataStore.SaveChangesAsync();
+            // Remove stale entries separately; each map write has its own transaction/context.
+            using var cleanupScope = _serviceProvider.CreateScope();
+            var store = cleanupScope.ServiceProvider.GetRequiredService<IDataStore>();
+            var hashes = mapInfoByHash.Keys.ToList();
+            var stale = await store.Set<MapInfo>().Where(m => !hashes.Contains(m.Hash)).ToListAsync();
+            store.Set<MapInfo>().RemoveRange(stale);
+            await store.SaveChangesAsync();
         }
 
         private async Task RemoveMapsFromCache(IEnumerable<string> mapHashes)
