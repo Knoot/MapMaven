@@ -5,9 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version for new release'
+        description: 'Build label (use a numeric version such as 1.6.6 when building an installer)'
         required: true
         type: string
+      build_installer:
+        description: 'Also create a Squirrel installer (requires a numeric version)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -15,7 +20,7 @@ jobs:
     runs-on: windows-latest
     
     env:
-      PUBLISH_PATH: "${{ github.workspace }}/MapMaven/bin/Release/net8.0-windows10.0.19041.0/win10-x64/publish"
+      PUBLISH_PATH: "${{ github.workspace }}/artifacts/MapMaven-Windows"
 
     steps:
     - uses: actions/checkout@v4
@@ -38,14 +43,25 @@ jobs:
         reporter: dotnet-trx
         fail-on-error: true
     - name: Publish
-      run: dotnet publish -f net8.0-windows10.0.19041.0 -c Release --self-contained
+      run: >-
+        dotnet publish -f net8.0-windows10.0.19041.0 -c Release -r win-x64
+        -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
+        -p:WindowsPackageType=None -p:PublishTrimmed=false
+        -o "${{ env.PUBLISH_PATH }}"
       working-directory: "${{ github.workspace }}/MapMaven"
     - name: Zip build
-      uses: TheDoctor0/zip-release@0.7.6
-      with:
-        filename: "${{ runner.temp }}/package/MapMaven-${{ inputs.version }}.zip"
-        path: "${{ env.PUBLISH_PATH }}/**"
+      shell: pwsh
+      run: |
+        if (!(Test-Path -LiteralPath "$env:PUBLISH_PATH/MapMaven.exe")) {
+          throw "Publish output is missing MapMaven.exe: $env:PUBLISH_PATH"
+        }
+        Copy-Item -LiteralPath scripts/Launch-MapMaven.cmd -Destination "$env:PUBLISH_PATH/"
+        Copy-Item -LiteralPath docs/windows-v4-build.md -Destination "$env:PUBLISH_PATH/README.md"
+        $packageDirectory = Join-Path $env:RUNNER_TEMP 'package'
+        New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
+        Compress-Archive -Path "$env:PUBLISH_PATH/*" -DestinationPath (Join-Path $packageDirectory 'MapMaven-win-x64.zip') -Force
     - name: Package build
+      if: inputs.build_installer
       run: >
         & "$HOME/.nuget/packages/clowd.squirrel/2.11.1/tools/Squirrel.exe" pack
         --packId "MapMaven"
