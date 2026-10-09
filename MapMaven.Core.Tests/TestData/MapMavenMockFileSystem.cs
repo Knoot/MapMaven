@@ -21,6 +21,14 @@ namespace MapMaven.Core.Tests.TestData
 
             AddMockMapInfo(mockFiles, TestData.TestMaps.Value);
 
+            // Score recovery also refreshes estimates. These shipped assets must exist in
+            // the mocked filesystem just as they do in the application output directory.
+            foreach (var model in new[] { "ScoreSaberScoreEstimateMLModel.mlnet", "BeatLeaderScoreEstimateMLModel.mlnet" })
+            {
+                var path = Path.Combine(AppContext.BaseDirectory, "ScoreEstimation", model);
+                mockFiles.Add(path, new MockFileData(File.ReadAllBytes(path)));
+            }
+
             return new MockFileSystem(mockFiles);
         }
 
@@ -59,11 +67,11 @@ namespace MapMaven.Core.Tests.TestData
         {
             var mapInfoJson = JsonSerializer.Serialize(mapInfo);
 
-            mapInfo.DirectoryPath = mapInfo.DirectoryPath
+            var directoryPath = mapInfo.DirectoryPath
                 .Replace(ReplacePath, $"{MockFilesBasePath}/");
 
-            mapInfoDictionary.Add($"{mapInfo.DirectoryPath}/", new MockDirectoryData());
-            mapInfoDictionary.Add($"{mapInfo.DirectoryPath}/Info.dat", new MockFileData(mapInfoJson));
+            mapInfoDictionary.Add($"{directoryPath}/", new MockDirectoryData());
+            mapInfoDictionary.Add($"{directoryPath}/Info.dat", new MockFileData(mapInfoJson));
         }
     }
 }
